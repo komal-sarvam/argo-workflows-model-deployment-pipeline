@@ -1,0 +1,4 @@
+fastapi==0.112.2
+uvicorn[standard]==0.30.6
+fastembed==0.3.3
+sentence-transformers==3.0.1

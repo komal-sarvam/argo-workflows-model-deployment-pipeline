@@ -7,11 +7,11 @@ replicaCount: 1
 
 # This sets the container image more information can be found here: https://kubernetes.io/docs/concepts/containers/images/
 image:
-  repository: ghcr.io/huggingface/text-embeddings-inference
+  repository: modelsync/embeddings-server
   # This sets the pull policy for images.
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
-  tag: "cpu-1.8"
+  tag: "0.1"
 
 # This is for the secrets for pulling an image from a private repository more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/pull-image-private-registry/
 imagePullSecrets: []
@@ -91,10 +91,12 @@ readinessProbe:
     path: /health
     port: http
 
-# Extra container args for TEI
-args:
-  - --model-id
-  - sentence-transformers/all-MiniLM-L6-v2
+# Extra container args
+args: []
+
+env:
+  - name: MODEL_ID
+    value: BAAI/bge-small-en-v1.5
 
 # This section is for setting up autoscaling more information can be found here: https://kubernetes.io/docs/concepts/workloads/autoscaling/
 autoscaling:
