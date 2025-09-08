@@ -5,12 +5,21 @@ metadata:
   namespace: argocd
 spec:
   project: default
-  source:
-    repoURL: https://github.com/komal-sarvam/modelsync-gitops-argocd.git
-    targetRevision: main
-    path: helm/tei
-    helm:
-      valueFiles: []
+  sources:
+    - repoURL: https://github.com/komal-sarvam/modelsync-gitops-argocd.git
+      targetRevision: main
+      path: helm/tei
+      helm:
+        releaseName: model-a
+        valueFiles:
+          - values/model-a.yaml
+    - repoURL: https://github.com/komal-sarvam/modelsync-gitops-argocd.git
+      targetRevision: main
+      path: helm/tei
+      helm:
+        releaseName: model-b
+        valueFiles:
+          - values/model-b.yaml
   destination:
     server: https://kubernetes.default.svc
     namespace: staging

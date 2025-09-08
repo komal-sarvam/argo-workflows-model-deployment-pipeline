@@ -1,0 +1,8 @@
+replicaCount: 1
+image:
+  repository: modelsync/embeddings-server
+  tag: "0.1"
+args: []
+env:
+  - name: MODEL_ID
+    value: sentence-transformers/all-MiniLM-L6-v2
