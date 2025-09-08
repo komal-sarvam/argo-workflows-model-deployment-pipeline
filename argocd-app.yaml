@@ -12,14 +12,17 @@ spec:
       helm:
         releaseName: model-a
         valueFiles:
-          - values/model-a.yaml
+          - $values/helm/tei/values/model-a.yaml
     - repoURL: https://github.com/komal-sarvam/modelsync-gitops-argocd.git
       targetRevision: main
       path: helm/tei
       helm:
         releaseName: model-b
         valueFiles:
-          - values/model-b.yaml
+          - $values/helm/tei/values/model-b.yaml
+    - repoURL: https://github.com/komal-sarvam/modelsync-gitops-argocd.git
+      targetRevision: main
+      ref: values
   destination:
     server: https://kubernetes.default.svc
     namespace: staging
