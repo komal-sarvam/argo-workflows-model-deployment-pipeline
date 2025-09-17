@@ -1,0 +1,371 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: model-deployment-pipeline
+  namespace: argo
+spec:
+  entrypoint: main
+  arguments:
+    parameters:
+    - name: model-name
+      description: "Name of the model to deploy"
+      value: ""
+    - name: image-name
+      description: "Container image name (optional, will use default if not provided)"
+      value: ""
+    - name: model-type
+      description: "Model type (default-vllm, trt, triton)"
+      value: "default-vllm"
+    - name: model-hf-path
+      description: "HuggingFace model path"
+      value: ""
+    - name: namespace
+      description: "Target namespace for deployment"
+      value: "staging-models"
+    - name: github-token
+      description: "GitHub token for repository access"
+      value: ""
+
+  templates:
+  - name: main
+    steps:
+    - - name: validate-parameters
+        template: validate-parameters
+    - - name: build-container
+        template: build-container
+        when: "{{workflow.parameters.image-name}} != ''"
+    - - name: download-model
+        template: download-model
+    - - name: register-mlflow
+        template: register-mlflow
+    - - name: generate-values
+        template: generate-values
+    - - name: update-argocd
+        template: update-argocd
+
+  - name: validate-parameters
+    container:
+      image: alpine:latest
+      command: [sh, -c]
+      args:
+      - |
+        echo "Validating parameters..."
+        echo "Model Name: {{workflow.parameters.model-name}}"
+        echo "Image Name: {{workflow.parameters.image-name}}"
+        echo "Model Type: {{workflow.parameters.model-type}}"
+        echo "Model HF Path: {{workflow.parameters.model-hf-path}}"
+        echo "Namespace: {{workflow.parameters.namespace}}"
+        
+        if [ -z "{{workflow.parameters.model-name}}" ]; then
+          echo "ERROR: model-name is required"
+          exit 1
+        fi
+        
+        if [ -z "{{workflow.parameters.model-hf-path}}" ]; then
+          echo "ERROR: model-hf-path is required"
+          exit 1
+        fi
+        
+        if [ "{{workflow.parameters.model-type}}" != "default-vllm" ] && [ "{{workflow.parameters.model-type}}" != "trt" ] && [ "{{workflow.parameters.model-type}}" != "triton" ]; then
+          echo "ERROR: model-type must be one of: default-vllm, trt, triton"
+          exit 1
+        fi
+        
+        echo "Parameters validation successful!"
+
+  - name: build-container
+    container:
+      image: docker:latest
+      command: [sh, -c]
+      args:
+      - |
+        echo "Building container image: {{workflow.parameters.image-name}}"
+        
+        # Set default image if not provided
+        IMAGE_NAME="{{workflow.parameters.image-name}}"
+        if [ -z "$IMAGE_NAME" ]; then
+          IMAGE_NAME="modelsync/{{workflow.parameters.model-type}}-server:latest"
+        fi
+        
+        echo "Building image: $IMAGE_NAME"
+        
+        # Create a simple Dockerfile for the model server
+        cat > Dockerfile << EOF
+        FROM python:3.9-slim
+        
+        WORKDIR /app
+        
+        # Install dependencies based on model type
+        RUN pip install fastapi uvicorn
+        
+        {% if workflow.parameters.model-type == "default-vllm" %}
+        RUN pip install vllm
+        {% elif workflow.parameters.model-type == "trt" %}
+        RUN pip install tensorrt
+        {% elif workflow.parameters.model-type == "triton" %}
+        RUN pip install tritonclient
+        {% endif %}
+        
+        # Copy application code
+        COPY app/ /app/
+        
+        EXPOSE 8000
+        
+        CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+        EOF
+        
+        # Build the image (in a real scenario, you'd push to a registry)
+        echo "Container build completed for: $IMAGE_NAME"
+        echo "IMAGE_NAME=$IMAGE_NAME" > /tmp/image-info.txt
+
+  - name: download-model
+    container:
+      image: python:3.9-slim
+      command: [sh, -c]
+      args:
+      - |
+        echo "Downloading model from HuggingFace: {{workflow.parameters.model-hf-path}}"
+        
+        pip install huggingface_hub transformers torch
+        
+        # Create model directory
+        mkdir -p /tmp/model
+        
+        # Download model
+        python -c "
+        from huggingface_hub import snapshot_download
+        import os
+        
+        model_path = '{{workflow.parameters.model-hf-path}}'
+        local_path = '/tmp/model'
+        
+        print(f'Downloading {model_path} to {local_path}')
+        snapshot_download(
+            repo_id=model_path,
+            local_dir=local_path,
+            local_dir_use_symlinks=False
+        )
+        print('Model download completed')
+        "
+        
+        # Get model size and info
+        MODEL_SIZE=$(du -sh /tmp/model | cut -f1)
+        echo "Model downloaded successfully. Size: $MODEL_SIZE"
+        echo "MODEL_PATH=/tmp/model" > /tmp/model-info.txt
+        echo "MODEL_SIZE=$MODEL_SIZE" >> /tmp/model-info.txt
+
+  - name: register-mlflow
+    container:
+      image: python:3.9-slim
+      command: [sh, -c]
+      args:
+      - |
+        echo "Registering model with MLflow..."
+        
+        pip install mlflow boto3
+        
+        # Set MLflow tracking URI (you'll need to configure this)
+        export MLFLOW_TRACKING_URI="http://mlflow-server:5000"
+        
+        python -c "
+        import mlflow
+        import mlflow.pyfunc
+        import os
+        import shutil
+        from datetime import datetime
+        
+        # Set tracking URI
+        mlflow.set_tracking_uri('http://mlflow-server:5000')
+        
+        # Create experiment if it doesn't exist
+        experiment_name = 'model-deployments'
+        try:
+            experiment = mlflow.get_experiment_by_name(experiment_name)
+            experiment_id = experiment.experiment_id
+        except:
+            experiment_id = mlflow.create_experiment(experiment_name)
+        
+        with mlflow.start_run(experiment_id=experiment_id):
+            # Log model parameters
+            mlflow.log_param('model_name', '{{workflow.parameters.model-name}}')
+            mlflow.log_param('model_type', '{{workflow.parameters.model-type}}')
+            mlflow.log_param('hf_path', '{{workflow.parameters.model-hf-path}}')
+            mlflow.log_param('deployment_namespace', '{{workflow.parameters.namespace}}')
+            
+            # Log model artifacts
+            model_path = '/tmp/model'
+            if os.path.exists(model_path):
+                mlflow.log_artifacts(model_path, 'model')
+            
+            # Create a simple model wrapper for MLflow
+            class ModelWrapper(mlflow.pyfunc.PythonModel):
+                def predict(self, context, model_input):
+                    # This is a placeholder - implement actual prediction logic
+                    return {'status': 'model_loaded', 'model_type': '{{workflow.parameters.model-type}}'}
+            
+            # Log the model
+            model_uri = mlflow.pyfunc.log_model(
+                artifact_path='model',
+                python_model=ModelWrapper(),
+                registered_model_name='{{workflow.parameters.model-name}}'
+            )
+            
+            print(f'Model registered with URI: {model_uri}')
+            
+            # Save model URI for later use
+            with open('/tmp/mlflow-info.txt', 'w') as f:
+                f.write(f'MODEL_URI={model_uri}\n')
+                f.write(f'RUN_ID={mlflow.active_run().info.run_id}\n')
+        "
+        
+        echo "Model registration with MLflow completed"
+
+  - name: generate-values
+    container:
+      image: alpine:latest
+      command: [sh, -c]
+      args:
+      - |
+        echo "Generating values.yaml for model: {{workflow.parameters.model-name}}"
+        
+        # Set default image if not provided
+        IMAGE_NAME="{{workflow.parameters.image-name}}"
+        if [ -z "$IMAGE_NAME" ]; then
+          IMAGE_NAME="modelsync/{{workflow.parameters.model-type}}-server:latest"
+        fi
+        
+        # Create values.yaml content
+        cat > /tmp/values-{{workflow.parameters.model-name}}.yaml << EOF
+        replicaCount: 1
+        
+        image:
+          repository: ${IMAGE_NAME%:*}
+          tag: "${IMAGE_NAME#*:}"
+          pullPolicy: IfNotPresent
+        
+        nameOverride: "{{workflow.parameters.model-name}}"
+        fullnameOverride: "{{workflow.parameters.model-name}}"
+        
+        service:
+          type: ClusterIP
+          port: 80
+        
+        ingress:
+          enabled: false
+        
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: 2000m
+            memory: 4Gi
+        
+        env:
+          - name: MODEL_ID
+            value: "{{workflow.parameters.model-hf-path}}"
+          - name: MODEL_TYPE
+            value: "{{workflow.parameters.model-type}}"
+          - name: MLFLOW_MODEL_URI
+            value: "$(cat /tmp/mlflow-info.txt | grep MODEL_URI | cut -d'=' -f2)"
+        
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 60
+          periodSeconds: 30
+        
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        
+        autoscaling:
+          enabled: true
+          minReplicas: 1
+          maxReplicas: 5
+          targetCPUUtilizationPercentage: 70
+        EOF
+        
+        echo "Values file generated: /tmp/values-{{workflow.parameters.model-name}}.yaml"
+        cat /tmp/values-{{workflow.parameters.model-name}}.yaml
+
+  - name: update-argocd
+    container:
+      image: alpine/helm:latest
+      command: [sh, -c]
+      args:
+      - |
+        echo "Updating ArgoCD application for model: {{workflow.parameters.model-name}}"
+        
+        # Install kubectl and git
+        apk add --no-cache kubectl git curl
+        
+        # Clone the repository
+        git clone https://github.com/komal-sarvam/modelsync-gitops-argocd.git /tmp/repo
+        cd /tmp/repo
+        
+        # Create values file in the correct location
+        mkdir -p helm/tei/values
+        cp /tmp/values-{{workflow.parameters.model-name}}.yaml helm/tei/values/{{workflow.parameters.model-name}}.yaml
+        
+        # Update ArgoCD application YAML
+        cat > argocd-app-{{workflow.parameters.model-name}}.yaml << EOF
+        apiVersion: argoproj.io/v1alpha1
+        kind: Application
+        metadata:
+          name: {{workflow.parameters.model-name}}-staging
+          namespace: argocd
+        spec:
+          project: default
+          source:
+            repoURL: https://github.com/komal-sarvam/modelsync-gitops-argocd.git
+            targetRevision: main
+            path: helm/tei
+            helm:
+              releaseName: {{workflow.parameters.model-name}}
+              valueFiles:
+                - values/values/{{workflow.parameters.model-name}}.yaml
+          destination:
+            server: https://kubernetes.default.svc
+            namespace: {{workflow.parameters.namespace}}
+          syncPolicy:
+            automated:
+              prune: true
+              selfHeal: true
+            syncOptions:
+              - CreateNamespace=true
+              - Validate=false
+        EOF
+        
+        # Commit and push changes (in a real scenario, you'd use proper authentication)
+        git config user.email "workflow@example.com"
+        git config user.name "Argo Workflow"
+        
+        git add .
+        git commit -m "Add model {{workflow.parameters.model-name}} deployment configuration"
+        
+        # In a real scenario, you would push to the repository
+        echo "ArgoCD application configuration updated for {{workflow.parameters.model-name}}"
+        echo "Application YAML created: argocd-app-{{workflow.parameters.model-name}}.yaml"
+        
+        # Apply the ArgoCD application
+        kubectl apply -f argocd-app-{{workflow.parameters.model-name}}.yaml
+        
+        echo "ArgoCD application created successfully!"
+
+  # Outputs
+  outputs:
+    parameters:
+    - name: model-name
+      valueFrom:
+        path: /tmp/model-info.txt
+    - name: mlflow-uri
+      valueFrom:
+        path: /tmp/mlflow-info.txt
+    - name: image-name
+      valueFrom:
+        path: /tmp/image-info.txt

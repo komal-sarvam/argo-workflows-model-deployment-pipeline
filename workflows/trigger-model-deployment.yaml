@@ -1,0 +1,22 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  name: deploy-model-example
+  namespace: argo
+spec:
+  workflowTemplateRef:
+    name: model-deployment-pipeline
+  arguments:
+    parameters:
+    - name: model-name
+      value: "test-model-001"
+    - name: image-name
+      value: "modelsync/vllm-server:latest"
+    - name: model-type
+      value: "default-vllm"
+    - name: model-hf-path
+      value: "BAAI/bge-small-en-v1.5"
+    - name: namespace
+      value: "staging-models"
+    - name: github-token
+      value: ""
