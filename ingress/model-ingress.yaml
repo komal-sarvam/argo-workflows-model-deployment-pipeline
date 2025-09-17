@@ -1,0 +1,101 @@
+# Model Service Ingress Configuration
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: model-ingress
+  namespace: staging-models
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, POST, PUT, DELETE, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "DNT,X-CustomHeader,Keep-Alive,User-Agent,X-Requested-With,If-Modified-Since,Cache-Control,Content-Type,Authorization"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+    # Linkerd annotations (if Linkerd is installed)
+    linkerd.io/inject: enabled
+    config.linkerd.io/skip-inbound-ports: "80,443"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: models.local
+    http:
+      paths:
+      - path: /models/(.*)
+        pathType: Prefix
+        backend:
+          service:
+            name: model-router
+            port:
+              number: 80
+  - host: api.models.local
+    http:
+      paths:
+      - path: /v1/models/(.*)
+        pathType: Prefix
+        backend:
+          service:
+            name: model-api
+            port:
+              number: 8000
+  - host: mlflow.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: mlflow-server
+            port:
+              number: 5000
+---
+# TLS Configuration (optional)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: model-ingress-tls
+  namespace: staging-models
+  annotations:
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    linkerd.io/inject: enabled
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - models.example.com
+    - api.models.example.com
+    - mlflow.example.com
+    secretName: model-tls-secret
+  rules:
+  - host: models.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: model-router
+            port:
+              number: 80
+  - host: api.models.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: model-api
+            port:
+              number: 8000
+  - host: mlflow.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: mlflow-server
+            port:
+              number: 5000

@@ -1,0 +1,165 @@
+# Linkerd Service Mesh Installation
+# This file contains the Linkerd installation configuration
+
+# Step 1: Install Linkerd CLI (run on local machine)
+# curl --proto '=https' --tlsv1.2 -sSfL https://run.linkerd.io/install | sh
+# export PATH=$PATH:$HOME/.linkerd2/bin
+
+# Step 2: Install Linkerd control plane
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: linkerd
+  labels:
+    linkerd.io/is-control-plane: "true"
+---
+# Linkerd control plane installation (simplified)
+# Note: This is a simplified version. In production, use the official Linkerd CLI
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: linkerd-controller
+  namespace: linkerd
+  labels:
+    app: linkerd-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: linkerd-controller
+  template:
+    metadata:
+      labels:
+        app: linkerd-controller
+    spec:
+      containers:
+      - name: linkerd-controller
+        image: gcr.io/linkerd-io/controller:stable-2.13.4
+        ports:
+        - containerPort: 8085
+        - containerPort: 9995
+        env:
+        - name: LINKERD2_PROXY_INBOUND_PORT
+          value: "4143"
+        - name: LINKERD2_PROXY_OUTBOUND_PORT
+          value: "4140"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 100Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: linkerd-controller-api
+  namespace: linkerd
+spec:
+  selector:
+    app: linkerd-controller
+  ports:
+  - name: http
+    port: 8085
+    targetPort: 8085
+  - name: admin-http
+    port: 9995
+    targetPort: 9995
+---
+# Linkerd proxy injector
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: linkerd-proxy-injector
+  namespace: linkerd
+  labels:
+    app: linkerd-proxy-injector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: linkerd-proxy-injector
+  template:
+    metadata:
+      labels:
+        app: linkerd-proxy-injector
+    spec:
+      containers:
+      - name: proxy-injector
+        image: gcr.io/linkerd-io/proxy-injector:stable-2.13.4
+        ports:
+        - containerPort: 8443
+        env:
+        - name: LINKERD2_PROXY_INBOUND_PORT
+          value: "4143"
+        - name: LINKERD2_PROXY_OUTBOUND_PORT
+          value: "4140"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 100Mi
+---
+# Linkerd service mesh configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: linkerd-config
+  namespace: linkerd
+data:
+  config.yaml: |
+    global:
+      linkerdNamespace: linkerd
+      cniEnabled: false
+      version: stable-2.13.4
+    proxy:
+      image:
+        name: gcr.io/linkerd-io/proxy
+        pullPolicy: IfNotPresent
+      logLevel: info
+      resources:
+        cpu:
+          limit: 100m
+          request: 10m
+        memory:
+          limit: 250Mi
+          request: 20Mi
+      ports:
+        inbound: 4143
+        admin: 4191
+        outbound: 4140
+      waitBeforeExitSeconds: 0
+      uid: 2102
+      gid: 2102
+    install:
+      namespace: linkerd
+      skipInboundPorts: "25,443,587,3306,5432,11211"
+      skipOutboundPorts: "25,443,587,3306,5432,11211"
+      ignoreCluster: false
+      ignoreInboundPorts: ""
+      ignoreOutboundPorts: ""
+      wait: 5m
+      crdWait: 1m
+      controlPlaneReplicas: 1
+      controlPlaneTracing: false
+      controlPlaneTracingNamespace: linkerd
+      highAvailability: false
+      enableH2Upgrade: true
+      enablePodAntiAffinity: false
+      enablePSP: false
+      enablePodDisruptionBudget: true
+      enableServiceProfile: true
+      enableTLS: true
+      enableExternalProfiles: false
+      identityTrustDomain: cluster.local
+      identityTrustAnchorsPEM: |
+        -----BEGIN CERTIFICATE-----
+        # This would contain the actual certificate in production
+        -----END CERTIFICATE-----
+      identityIssuerTLS:
+        crtExpiry: 2024-12-31T23:59:59Z
+        keyPEM: |
+          -----BEGIN PRIVATE KEY-----
+          # This would contain the actual private key in production
+          -----END PRIVATE KEY-----
+        crtPEM: |
+          -----BEGIN CERTIFICATE-----
+          # This would contain the actual certificate in production
+          -----END CERTIFICATE-----

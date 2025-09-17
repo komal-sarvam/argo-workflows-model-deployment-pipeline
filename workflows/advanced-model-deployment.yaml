@@ -394,13 +394,25 @@ spec:
           targetPort: 8000
         
         ingress:
-          enabled: false
-          className: ""
-          annotations: {}
+          enabled: true
+          className: "nginx"
+          annotations:
+            nginx.ingress.kubernetes.io/rewrite-target: /
+            nginx.ingress.kubernetes.io/ssl-redirect: "false"
+            nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+            nginx.ingress.kubernetes.io/rate-limit: "100"
+            nginx.ingress.kubernetes.io/rate-limit-window: "1m"
+            # Linkerd annotations (if Linkerd is installed)
+            linkerd.io/inject: enabled
+            config.linkerd.io/skip-inbound-ports: "80,443"
           hosts:
-            - host: {{workflow.parameters.model-name}}.example.com
+            - host: {{workflow.parameters.model-name}}.models.local
               paths:
                 - path: /
+                  pathType: Prefix
+            - host: api.models.local
+              paths:
+                - path: /v1/models/{{workflow.parameters.model-name}}
                   pathType: Prefix
         
         # Resource requirements based on model type
@@ -453,6 +465,12 @@ spec:
           maxReplicas: 5
           targetCPUUtilizationPercentage: 70
           targetMemoryUtilizationPercentage: 80
+        
+        # Pod annotations for Linkerd injection
+        podAnnotations:
+          linkerd.io/inject: enabled
+          config.linkerd.io/skip-inbound-ports: "8000"
+          config.linkerd.io/skip-outbound-ports: "5000"
         
         # Pod security context
         podSecurityContext:
