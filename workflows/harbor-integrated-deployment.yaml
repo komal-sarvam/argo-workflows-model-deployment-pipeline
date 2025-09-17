@@ -1,7 +1,7 @@
 apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
-  name: advanced-model-deployment-pipeline
+  name: harbor-model-deployment-pipeline
   namespace: argo
 spec:
   entrypoint: main
@@ -28,15 +28,18 @@ spec:
     - name: mlflow-tracking-uri
       description: "MLflow tracking server URI"
       value: "http://mlflow-server:5000"
-    - name: registry-url
-      description: "Container registry URL"
-      value: "docker.io"
-    - name: registry-username
-      description: "Container registry username"
+    - name: harbor-registry-url
+      description: "Harbor registry URL"
+      value: "harbor.yourcompany.com"
+    - name: harbor-username
+      description: "Harbor registry username"
       value: ""
-    - name: registry-password
-      description: "Container registry password"
+    - name: harbor-password
+      description: "Harbor registry password"
       value: ""
+    - name: harbor-project
+      description: "Harbor project name"
+      value: "ml-models"
 
   serviceAccountName: argo
   templates:
@@ -46,8 +49,10 @@ spec:
         template: validate-parameters
     - - name: check-model-exists
         template: check-model-exists
-    - - name: build-container
-        template: build-container
+    - - name: setup-harbor-auth
+        template: setup-harbor-auth
+    - - name: build-and-push-container
+        template: build-and-push-container
     - - name: download-model
         template: download-model
     - - name: register-mlflow
@@ -71,6 +76,8 @@ spec:
         echo "Model Type: {{workflow.parameters.model-type}}"
         echo "Model HF Path: {{workflow.parameters.model-hf-path}}"
         echo "Namespace: {{workflow.parameters.namespace}}"
+        echo "Harbor Registry: {{workflow.parameters.harbor-registry-url}}"
+        echo "Harbor Project: {{workflow.parameters.harbor-project}}"
         echo "MLflow URI: {{workflow.parameters.mlflow-tracking-uri}}"
         
         # Validate required parameters
@@ -81,6 +88,21 @@ spec:
         
         if [ -z "{{workflow.parameters.model-hf-path}}" ]; then
           echo "❌ ERROR: model-hf-path is required"
+          exit 1
+        fi
+        
+        if [ -z "{{workflow.parameters.harbor-registry-url}}" ]; then
+          echo "❌ ERROR: harbor-registry-url is required"
+          exit 1
+        fi
+        
+        if [ -z "{{workflow.parameters.harbor-username}}" ]; then
+          echo "❌ ERROR: harbor-username is required"
+          exit 1
+        fi
+        
+        if [ -z "{{workflow.parameters.harbor-password}}" ]; then
+          echo "❌ ERROR: harbor-password is required"
           exit 1
         fi
         
@@ -136,21 +158,79 @@ spec:
         
         echo "✅ Model availability check completed"
 
-  - name: build-container
+  - name: setup-harbor-auth
+    container:
+      image: alpine:latest
+      command: [sh, -c]
+      args:
+      - |
+        echo "=== Setting up Harbor Registry Authentication ==="
+        
+        # Install Docker CLI
+        apk add --no-cache docker-cli
+        
+        # Create Harbor registry configuration
+        HARBOR_REGISTRY="{{workflow.parameters.harbor-registry-url}}"
+        HARBOR_USERNAME="{{workflow.parameters.harbor-username}}"
+        HARBOR_PASSWORD="{{workflow.parameters.harbor-password}}"
+        HARBOR_PROJECT="{{workflow.parameters.harbor-project}}"
+        
+        echo "🔐 Configuring Harbor authentication..."
+        echo "   - Registry: $HARBOR_REGISTRY"
+        echo "   - Project: $HARBOR_PROJECT"
+        echo "   - Username: $HARBOR_USERNAME"
+        
+        # Create Docker config for Harbor
+        mkdir -p ~/.docker
+        cat > ~/.docker/config.json << EOF
+        {
+          "auths": {
+            "$HARBOR_REGISTRY": {
+              "auth": "$(echo -n "$HARBOR_USERNAME:$HARBOR_PASSWORD" | base64)"
+            }
+          }
+        }
+        EOF
+        
+        # Test Harbor connectivity
+        echo "🔍 Testing Harbor connectivity..."
+        if docker login $HARBOR_REGISTRY -u $HARBOR_USERNAME -p $HARBOR_PASSWORD; then
+          echo "✅ Harbor authentication successful"
+        else
+          echo "❌ ERROR: Failed to authenticate with Harbor"
+          exit 1
+        fi
+        
+        # Save Harbor configuration
+        echo "HARBOR_REGISTRY=$HARBOR_REGISTRY" > /tmp/harbor-config.txt
+        echo "HARBOR_PROJECT=$HARBOR_PROJECT" >> /tmp/harbor-config.txt
+        echo "HARBOR_USERNAME=$HARBOR_USERNAME" >> /tmp/harbor-config.txt
+        
+        echo "✅ Harbor authentication setup completed"
+
+  - name: build-and-push-container
     container:
       image: docker:latest
       command: [sh, -c]
       args:
       - |
-        echo "=== Building Container Image ==="
+        echo "=== Building and Pushing Container to Harbor ==="
         
-        # Set default image if not provided
+        # Load Harbor configuration
+        source /tmp/harbor-config.txt
+        
+        # Set image name with Harbor registry
         IMAGE_NAME="{{workflow.parameters.image-name}}"
         if [ -z "$IMAGE_NAME" ]; then
-          IMAGE_NAME="{{workflow.parameters.registry-url}}/modelsync/{{workflow.parameters.model-type}}-server:latest"
+          IMAGE_NAME="$HARBOR_REGISTRY/$HARBOR_PROJECT/{{workflow.parameters.model-type}}-server:latest"
+        else
+          # Ensure image name includes Harbor registry
+          if [[ "$IMAGE_NAME" != *"$HARBOR_REGISTRY"* ]]; then
+            IMAGE_NAME="$HARBOR_REGISTRY/$HARBOR_PROJECT/$IMAGE_NAME"
+          fi
         fi
         
-        echo "Building image: $IMAGE_NAME"
+        echo "🏗️ Building image: $IMAGE_NAME"
         
         # Create Dockerfile based on model type
         cat > Dockerfile << EOF
@@ -196,7 +276,7 @@ spec:
         EOF
         
         # Build the image
-        echo "Building Docker image..."
+        echo "🔨 Building Docker image..."
         docker build -t "$IMAGE_NAME" .
         
         # Tag with timestamp for versioning
@@ -204,13 +284,26 @@ spec:
         VERSIONED_IMAGE="${IMAGE_NAME%:*}:${TIMESTAMP}"
         docker tag "$IMAGE_NAME" "$VERSIONED_IMAGE"
         
-        echo "✅ Container build completed"
+        # Tag with model name for better tracking
+        MODEL_TAGGED_IMAGE="${IMAGE_NAME%:*}:{{workflow.parameters.model-name}}"
+        docker tag "$IMAGE_NAME" "$MODEL_TAGGED_IMAGE"
+        
+        echo "📤 Pushing images to Harbor registry..."
+        
+        # Push all tagged versions
+        docker push "$IMAGE_NAME"
+        docker push "$VERSIONED_IMAGE"
+        docker push "$MODEL_TAGGED_IMAGE"
+        
+        echo "✅ Container build and push completed"
         echo "   - Base image: $IMAGE_NAME"
         echo "   - Versioned image: $VERSIONED_IMAGE"
+        echo "   - Model tagged image: $MODEL_TAGGED_IMAGE"
         
         # Save image info
         echo "IMAGE_NAME=$IMAGE_NAME" > /tmp/image-info.txt
         echo "VERSIONED_IMAGE=$VERSIONED_IMAGE" >> /tmp/image-info.txt
+        echo "MODEL_TAGGED_IMAGE=$MODEL_TAGGED_IMAGE" >> /tmp/image-info.txt
         echo "TIMESTAMP=$TIMESTAMP" >> /tmp/image-info.txt
 
   - name: download-model
@@ -303,6 +396,8 @@ spec:
             mlflow.log_param('model_type', '{{workflow.parameters.model-type}}')
             mlflow.log_param('hf_path', '{{workflow.parameters.model-hf-path}}')
             mlflow.log_param('deployment_namespace', '{{workflow.parameters.namespace}}')
+            mlflow.log_param('harbor_registry', '{{workflow.parameters.harbor-registry-url}}')
+            mlflow.log_param('harbor_project', '{{workflow.parameters.harbor-project}}')
             mlflow.log_param('deployment_timestamp', datetime.now().isoformat())
             
             # Log model artifacts
@@ -317,6 +412,8 @@ spec:
                 'model_type': '{{workflow.parameters.model-type}}',
                 'hf_path': '{{workflow.parameters.model-hf-path}}',
                 'deployment_namespace': '{{workflow.parameters.namespace}}',
+                'harbor_registry': '{{workflow.parameters.harbor-registry-url}}',
+                'harbor_project': '{{workflow.parameters.harbor-project}}',
                 'deployment_timestamp': datetime.now().isoformat()
             }
             
@@ -332,6 +429,7 @@ spec:
                         'status': 'model_loaded',
                         'model_type': '{{workflow.parameters.model-type}}',
                         'model_name': '{{workflow.parameters.model-name}}',
+                        'harbor_image': '{{workflow.parameters.harbor-registry-url}}/{{workflow.parameters.harbor-project}}/{{workflow.parameters.model-type}}-server:{{workflow.parameters.model-name}}',
                         'timestamp': datetime.now().isoformat()
                     }
             
@@ -361,11 +459,8 @@ spec:
       - |
         echo "=== Generating Helm Values ==="
         
-        # Set default image if not provided
-        IMAGE_NAME="{{workflow.parameters.image-name}}"
-        if [ -z "$IMAGE_NAME" ]; then
-          IMAGE_NAME="{{workflow.parameters.registry-url}}/modelsync/{{workflow.parameters.model-type}}-server:latest"
-        fi
+        # Load image info
+        source /tmp/image-info.txt
         
         # Read model info
         MODEL_SIZE=$(grep MODEL_SIZE /tmp/model-info.txt | cut -d'=' -f2)
@@ -376,6 +471,7 @@ spec:
         # Generated values for {{workflow.parameters.model-name}}
         # Model Type: {{workflow.parameters.model-type}}
         # HuggingFace Path: {{workflow.parameters.model-hf-path}}
+        # Harbor Registry: {{workflow.parameters.harbor-registry-url}}
         # Generated at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
         
         replicaCount: 1
@@ -383,7 +479,11 @@ spec:
         image:
           repository: ${IMAGE_NAME%:*}
           tag: "${IMAGE_NAME#*:}"
-          pullPolicy: IfNotPresent
+          pullPolicy: Always
+        
+        # Harbor registry configuration
+        imagePullSecrets:
+          - name: harbor-registry-secret
         
         nameOverride: "{{workflow.parameters.model-name}}"
         fullnameOverride: "{{workflow.parameters.model-name}}"
@@ -420,6 +520,10 @@ spec:
             value: "{{workflow.parameters.model-type}}"
           - name: MODEL_NAME
             value: "{{workflow.parameters.model-name}}"
+          - name: HARBOR_REGISTRY
+            value: "{{workflow.parameters.harbor-registry-url}}"
+          - name: HARBOR_PROJECT
+            value: "{{workflow.parameters.harbor-project}}"
           - name: MLFLOW_MODEL_URI
             value: "$(cat /tmp/mlflow-info.txt | grep MODEL_URI | cut -d'=' -f2)"
           - name: MODEL_SIZE
@@ -530,6 +634,7 @@ spec:
             app.kubernetes.io/name: {{workflow.parameters.model-name}}
             app.kubernetes.io/component: model-server
             model-type: {{workflow.parameters.model-type}}
+            harbor-registry: {{workflow.parameters.harbor-registry-url}}
           annotations:
             argocd.argoproj.io/sync-wave: "1"
             deployment-timestamp: "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -568,6 +673,7 @@ spec:
         
         - Model Type: {{workflow.parameters.model-type}}
         - HuggingFace Path: {{workflow.parameters.model-hf-path}}
+        - Harbor Registry: {{workflow.parameters.harbor-registry-url}}
         - Target Namespace: {{workflow.parameters.namespace}}
         - Generated at: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
         
@@ -652,6 +758,9 @@ spec:
     - name: image-name
       valueFrom:
         path: /tmp/image-info.txt
+    - name: harbor-config
+      valueFrom:
+        path: /tmp/harbor-config.txt
     artifacts:
     - name: values-file
       path: /tmp/values-{{workflow.parameters.model-name}}.yaml
